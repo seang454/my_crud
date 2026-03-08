@@ -5,6 +5,11 @@ if ($conn->connect_error) die("Connection failed: " . $conn->connect_error);
 $action = $_GET['action'] ?? '';
 $tab    = $_GET['tab'] ?? 'books';
 
+// Pagination settings
+$per_page     = 10;
+$books_page   = max(1, (int)($_GET['books_page']  ?? 1));
+$authors_page = max(1, (int)($_GET['authors_page'] ?? 1));
+
 if ($action === 'delete_book') {
     $id = (int)$_GET['id'];
     $conn->query("DELETE FROM books WHERE book_id = $id");
@@ -52,14 +57,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_author'])) {
     header("Location: ?tab=authors"); exit;
 }
 
+// Count totals for pagination
+$total_books   = $conn->query("SELECT COUNT(*) AS c FROM books")->fetch_assoc()['c'];
+$total_authors = $conn->query("SELECT COUNT(*) AS c FROM authors")->fetch_assoc()['c'];
+$total_book_pages   = max(1, (int)ceil($total_books   / $per_page));
+$total_author_pages = max(1, (int)ceil($total_authors / $per_page));
+
+// Clamp pages within valid range
+$books_page   = min($books_page,   $total_book_pages);
+$authors_page = min($authors_page, $total_author_pages);
+
+$books_offset   = ($books_page   - 1) * $per_page;
+$authors_offset = ($authors_page - 1) * $per_page;
+
 $books = $conn->query("
     SELECT b.*, GROUP_CONCAT(a.name SEPARATOR ', ') AS authors
     FROM books b
     LEFT JOIN book_details bd ON b.book_id = bd.book_id AND bd.is_deleted = 0
     LEFT JOIN authors a ON bd.author_id = a.author_id
-    GROUP BY b.book_id ORDER BY b.book_id DESC");
+    GROUP BY b.book_id
+    ORDER BY b.book_id DESC
+    LIMIT $per_page OFFSET $books_offset");
 
-$authors     = $conn->query("SELECT * FROM authors ORDER BY name");
+$authors     = $conn->query("SELECT * FROM authors ORDER BY name LIMIT $per_page OFFSET $authors_offset");
 $all_authors = $conn->query("SELECT * FROM authors ORDER BY name");
 
 $edit_book   = null;
@@ -76,6 +96,14 @@ if ($action === 'edit_book') {
 if ($action === 'edit_author') {
     $edit_author = $conn->query("SELECT * FROM authors WHERE author_id=".(int)$_GET['id'])->fetch_assoc();
     $tab = 'authors';
+}
+
+// Helper: build a pagination URL preserving current query params
+function paginate_url(string $param, int $page): string {
+    $params = $_GET;
+    $params[$param] = $page;
+    unset($params['action'], $params['id']); // clear edit state when paginating
+    return '?' . http_build_query($params);
 }
 ?>
 <!DOCTYPE html>
@@ -107,6 +135,51 @@ if ($action === 'edit_author') {
   .btn-yellow { background: #f39c12; color: #fff; }
   .btn-red    { background: #e74c3c; color: #fff; }
   .btn:hover  { opacity: .85; }
+
+  /* ── Pagination ── */
+  .pagination {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 16px;
+    flex-wrap: wrap;
+  }
+  .pagination a,
+  .pagination span {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 34px;
+    height: 34px;
+    padding: 0 10px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 13px;
+    text-decoration: none;
+    background: #fff;
+    color: #2c3e50;
+    line-height: 1;
+  }
+  .pagination a:hover { background: #ecf0f1; }
+  .pagination span.current {
+    background: #2c3e50;
+    color: #fff;
+    border-color: #2c3e50;
+    font-weight: bold;
+  }
+  .pagination span.disabled {
+    color: #bbb;
+    cursor: default;
+    background: #fafafa;
+  }
+  .pagination .page-info {
+    font-size: 13px;
+    color: #666;
+    margin-left: 8px;
+    border: none;
+    background: none;
+    min-width: unset;
+  }
 </style>
 </head>
 <body>
@@ -169,16 +242,19 @@ if ($action === 'edit_author') {
       <tr><th>#</th><th>Title</th><th>Category</th><th>Pages</th><th>Year</th><th>Authors</th><th>Actions</th></tr>
     </thead>
     <tbody>
-    <?php $i = 1; while ($b = $books->fetch_assoc()): ?>
+    <?php
+      $row_num = $books_offset + 1;
+      while ($b = $books->fetch_assoc()):
+    ?>
       <tr>
-        <td><?= $i++ ?></td>
+        <td><?= $row_num++ ?></td>
         <td><?= htmlspecialchars($b['title']) ?></td>
         <td><?= htmlspecialchars($b['category'] ?? '—') ?></td>
         <td><?= $b['page'] ?: '—' ?></td>
         <td><?= $b['publish_year'] ?: '—' ?></td>
         <td><?= htmlspecialchars($b['authors'] ?? '—') ?></td>
         <td>
-          <a href="?action=edit_book&id=<?= $b['book_id'] ?>" class="btn btn-yellow">Edit</a>
+          <a href="?action=edit_book&id=<?= $b['book_id'] ?>&tab=books&books_page=<?= $books_page ?>" class="btn btn-yellow">Edit</a>
           <a href="?action=delete_book&id=<?= $b['book_id'] ?>" class="btn btn-red"
              onclick="return confirm('Delete this book?')">Delete</a>
         </td>
@@ -186,6 +262,43 @@ if ($action === 'edit_author') {
     <?php endwhile ?>
     </tbody>
   </table>
+
+  <!-- Books Pagination -->
+  <?php if ($total_book_pages > 1): ?>
+  <div class="pagination">
+    <?php if ($books_page > 1): ?>
+      <a href="<?= paginate_url('books_page', 1) ?>">&laquo;</a>
+      <a href="<?= paginate_url('books_page', $books_page - 1) ?>">&lsaquo;</a>
+    <?php else: ?>
+      <span class="disabled">&laquo;</span>
+      <span class="disabled">&lsaquo;</span>
+    <?php endif ?>
+
+    <?php
+      $start = max(1, $books_page - 2);
+      $end   = min($total_book_pages, $books_page + 2);
+      if ($start > 1): ?><span class="disabled">…</span><?php endif;
+      for ($p = $start; $p <= $end; $p++):
+    ?>
+      <?php if ($p === $books_page): ?>
+        <span class="current"><?= $p ?></span>
+      <?php else: ?>
+        <a href="<?= paginate_url('books_page', $p) ?>"><?= $p ?></a>
+      <?php endif ?>
+    <?php endfor ?>
+    <?php if ($end < $total_book_pages): ?><span class="disabled">…</span><?php endif ?>
+
+    <?php if ($books_page < $total_book_pages): ?>
+      <a href="<?= paginate_url('books_page', $books_page + 1) ?>">&rsaquo;</a>
+      <a href="<?= paginate_url('books_page', $total_book_pages) ?>">&raquo;</a>
+    <?php else: ?>
+      <span class="disabled">&rsaquo;</span>
+      <span class="disabled">&raquo;</span>
+    <?php endif ?>
+
+    <span class="page-info">Page <?= $books_page ?> of <?= $total_book_pages ?> &mdash; <?= $total_books ?> books</span>
+  </div>
+  <?php endif ?>
 
 <?php else: ?>
 
@@ -216,14 +329,17 @@ if ($action === 'edit_author') {
       <tr><th>#</th><th>Name</th><th>Email</th><th>Address</th><th>Actions</th></tr>
     </thead>
     <tbody>
-    <?php $i = 1; while ($a = $authors->fetch_assoc()): ?>
+    <?php
+      $row_num = $authors_offset + 1;
+      while ($a = $authors->fetch_assoc()):
+    ?>
       <tr>
-        <td><?= $i++ ?></td>
+        <td><?= $row_num++ ?></td>
         <td><?= htmlspecialchars($a['name']) ?></td>
         <td><?= htmlspecialchars($a['email']) ?></td>
         <td><?= htmlspecialchars($a['address'] ?? '—') ?></td>
         <td>
-          <a href="?action=edit_author&id=<?= $a['author_id'] ?>&tab=authors" class="btn btn-yellow">Edit</a>
+          <a href="?action=edit_author&id=<?= $a['author_id'] ?>&tab=authors&authors_page=<?= $authors_page ?>" class="btn btn-yellow">Edit</a>
           <a href="?action=delete_author&id=<?= $a['author_id'] ?>" class="btn btn-red"
              onclick="return confirm('Delete this author?')">Delete</a>
         </td>
@@ -231,6 +347,43 @@ if ($action === 'edit_author') {
     <?php endwhile ?>
     </tbody>
   </table>
+
+  <!-- Authors Pagination -->
+  <?php if ($total_author_pages > 1): ?>
+  <div class="pagination">
+    <?php if ($authors_page > 1): ?>
+      <a href="<?= paginate_url('authors_page', 1) ?>">&laquo;</a>
+      <a href="<?= paginate_url('authors_page', $authors_page - 1) ?>">&lsaquo;</a>
+    <?php else: ?>
+      <span class="disabled">&laquo;</span>
+      <span class="disabled">&lsaquo;</span>
+    <?php endif ?>
+
+    <?php
+      $start = max(1, $authors_page - 2);
+      $end   = min($total_author_pages, $authors_page + 2);
+      if ($start > 1): ?><span class="disabled">…</span><?php endif;
+      for ($p = $start; $p <= $end; $p++):
+    ?>
+      <?php if ($p === $authors_page): ?>
+        <span class="current"><?= $p ?></span>
+      <?php else: ?>
+        <a href="<?= paginate_url('authors_page', $p) ?>"><?= $p ?></a>
+      <?php endif ?>
+    <?php endfor ?>
+    <?php if ($end < $total_author_pages): ?><span class="disabled">…</span><?php endif ?>
+
+    <?php if ($authors_page < $total_author_pages): ?>
+      <a href="<?= paginate_url('authors_page', $authors_page + 1) ?>">&rsaquo;</a>
+      <a href="<?= paginate_url('authors_page', $total_author_pages) ?>">&raquo;</a>
+    <?php else: ?>
+      <span class="disabled">&rsaquo;</span>
+      <span class="disabled">&raquo;</span>
+    <?php endif ?>
+
+    <span class="page-info">Page <?= $authors_page ?> of <?= $total_author_pages ?> &mdash; <?= $total_authors ?> authors</span>
+  </div>
+  <?php endif ?>
 
 <?php endif ?>
 </div>
